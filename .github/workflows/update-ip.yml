@@ -1,0 +1,110 @@
+name: 每日优选IP
+
+on:
+  schedule:
+    - cron: '0 20 * * *'   # 每天北京时间 04:00
+  workflow_dispatch:        # 允许手动运行
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 测速并生成 ip.txt
+        run: |
+          cat > /tmp/update.py <<'PY'
+          import subprocess, re, time, json, random, concurrent.futures as cf
+          SOURCES=['https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ip-collected.txt',
+           'https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ip-scanned-top400.txt',
+           'https://raw.githubusercontent.com/joname1/BestCFip/refs/heads/main/ipv4.txt',
+           'https://raw.githubusercontent.com/svip-s/cloudflare_ip/refs/heads/main/full_ips.txt',
+           'https://raw.githubusercontent.com/hubbylei/bestcf/main/bestcf.txt',
+           'https://raw.githubusercontent.com/hubbylei/bestcf/main/bestproxy.txt',
+           'https://raw.githubusercontent.com/ymyuuu/IPDB/main/bestproxy.txt',
+           'https://raw.githubusercontent.com/ymyuuu/IPDB/main/bestcf.txt',
+           'https://raw.githubusercontent.com/gslege/CloudflareIP/main/All.txt',
+           'https://raw.githubusercontent.com/gslege/CloudflareIP/main/More.txt',
+           'https://raw.githubusercontent.com/gslege/CloudflareIP/main/Me.txt',
+           'https://raw.githubusercontent.com/gslege/CloudflareIP/main/JP.txt',
+           'https://raw.githubusercontent.com/gslege/CloudflareIP/main/SG.txt',
+           'https://ip.164746.xyz/ipTop10.html']
+          REG={'US':'美国','JP':'日本','HK':'香港','KR':'韩国','SG':'新加坡','TW':'台湾'}
+          ORDER=['HK','JP','KR','SG','TW','US']
+          MIN=5.0; TOTAL=100; PER=5
+          def sh(a): return subprocess.run(a,capture_output=True,text=True).stdout
+
+          ips=set()
+          for u in SOURCES:
+              ips|=set(re.findall(r'(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d./])',sh(['curl','-sL','--max-time','20',u])))
+          ips=sorted(i for i in ips if all(int(p)<256 for p in i.split('.')))
+          cand={}
+          for k in range(0,len(ips),100):
+              b=ips[k:k+100]
+              try:
+                  for x in json.loads(sh(['curl','-s','--max-time','20','-X','POST','http://ip-api.com/batch?fields=query,countryCode,as','-d',json.dumps(b)])):
+                      if 'AS13335' in (x.get('as') or ''): cand[x['query']]=('US',True)
+                      elif x.get('countryCode') in REG: cand[x['query']]=(x['countryCode'],False)
+              except Exception: pass
+              time.sleep(4.5)
+          proxies=[i for i,v in cand.items() if not v[1]]; official=[i for i,v in cand.items() if v[1]]
+          random.shuffle(official)
+          print('源IP',len(ips),'候选',len(cand),'非官方',len(proxies),'官方',len(official))
+
+          def test_big(ip):
+              o=sh(['curl','-s','-o','/dev/null','--connect-timeout','2','--max-time','6','--resolve',f'speed.cloudflare.com:443:{ip}',
+                    '-w','%{http_code} %{speed_download} %{size_download}','https://speed.cloudflare.com/__down?bytes=25000000'])
+              try:
+                  c,sp,sz=o.split()
+                  return c,(float(sp)/1048576 if c=='200' and float(sz)>1e6 else 0)
+              except Exception: return 'err',0
+          CDN='https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.17.0/tf.min.js'
+          def test_cdn(ip):
+              a=['curl','-s','--connect-timeout','2','--max-time','8','--resolve',f'cdnjs.cloudflare.com:443:{ip}','-H','Accept-Encoding: identity',
+                 '-w','%{http_code} %{size_download} %{time_total} %{time_starttransfer}\n']
+              for _ in range(5): a+=['-o','/dev/null',CDN]
+              L=[l.split() for l in sh(a).splitlines() if l.strip()]
+              ok=[l for l in L if l[0]=='200' and float(l[1])>1e6]
+              if not ok: return 0
+              return sum(float(l[1]) for l in ok)/sum(max(float(l[2])-float(l[3]),0.01) for l in ok)/1048576
+
+          good={}; rl=[]
+          with cf.ThreadPoolExecutor(2) as ex:
+              for ip,(c,sp) in zip(proxies,ex.map(test_big,proxies)):
+                  if sp>MIN: good[ip]=sp
+                  elif c=='429': rl.append(ip)
+          if rl:
+              time.sleep(60)
+              for ip in rl:
+                  c,sp=test_big(ip)
+                  if sp>MIN: good[ip]=sp
+          with cf.ThreadPoolExecutor(4) as ex:
+              for k in range(0,len(official),20):
+                  if len(good)>=TOTAL+5: break
+                  b=official[k:k+20]
+                  for ip,sp in zip(b,ex.map(test_cdn,b)):
+                      if sp>MIN: good[ip]=sp
+          pick=[]
+          for r in ORDER: pick+=sorted([i for i in good if cand[i][0]==r],key=lambda i:-good[i])[:PER]
+          pick+=sorted([i for i in good if i not in pick],key=lambda i:-good[i])[:max(0,TOTAL-len(pick))]
+          lines=[]
+          for r in ORDER:
+              for n,i in enumerate(sorted([i for i in pick if cand[i][0]==r],key=lambda i:-good[i]),1):
+                  lines.append(f'{i}:443#{REG[r]}{n:02d}')
+          print('达标',len(good),'发布',len(lines),{REG[r]:sum(1 for i in pick if cand[i][0]==r) for r in ORDER})
+          if len(lines)>=20: open('ip.txt','w').write('\n'.join(lines)+'\n')
+          else: print('达标太少，保留旧文件')
+          PY
+          python3 /tmp/update.py
+
+      - name: 提交
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ip.txt
+          git diff --cached --quiet || git commit -m "更新优选IP $(TZ=Asia/Shanghai date '+%F %H:%M')"
+          git push
