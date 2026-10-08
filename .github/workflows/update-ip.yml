@@ -91,12 +91,15 @@ jobs:
           pick=[]
           for r in ORDER: pick+=sorted([i for i in good if cand[i][0]==r],key=lambda i:-good[i])[:PER]
           pick+=sorted([i for i in good if i not in pick],key=lambda i:-good[i])[:max(0,TOTAL-len(pick))]
-          lines=[]
+          lines=[]; slines=[]
           for r in ORDER:
               for n,i in enumerate(sorted([i for i in pick if cand[i][0]==r],key=lambda i:-good[i]),1):
                   lines.append(f'{i}:443#{REG[r]}{n:02d}')
+                  slines.append(f'{i}:443#{REG[r]}{n:02d} {good[i]:.2f}MB/s')
           print('达标',len(good),'发布',len(lines),{REG[r]:sum(1 for i in pick if cand[i][0]==r) for r in ORDER})
-          if len(lines)>=20: open('ip.txt','w').write('\n'.join(lines)+'\n')
+          if len(lines)>=20:
+              open('ip.txt','w').write('\n'.join(lines)+'\n')
+              open('ip_speed.txt','w').write('\n'.join(slines)+'\n')
           else: print('达标太少，保留旧文件')
           PY
           python3 /tmp/update.py
@@ -105,6 +108,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ip.txt
+          git add ip.txt; [ -f ip_speed.txt ] && git add ip_speed.txt || true
           git diff --cached --quiet || git commit -m "更新优选IP $(TZ=Asia/Shanghai date '+%F %H:%M')"
           git push
